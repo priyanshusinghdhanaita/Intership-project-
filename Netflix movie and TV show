@@ -1,0 +1,53 @@
+# kagglehub.py
+# Small wrapper around the Kaggle API to download a dataset and return the path
+
+import os
+import tempfile
+from typing import Optional
+
+try:
+    from kaggle.api.kaggle_api_extended import KaggleApi
+except Exception as e:
+    raise ImportError(
+        "kaggle package is required. Install with `pip install kaggle` and "
+        "make sure your Kaggle credentials are configured (KAGGLE_USERNAME & KAGGLE_KEY "
+        "or ~/.kaggle/kaggle.json). Original error: " + str(e)
+    )
+
+
+def dataset_download(dataset_slug: str, path: Optional[str] = None, unzip: bool = True, force: bool = False) -> str:
+    """
+    Download the latest version of a Kaggle dataset and return the path containing the files.
+
+    Args:
+        dataset_slug: Kaggle dataset identifier in the form "owner/dataset-name", e.g. "shivamb/netflix-shows".
+        path: Directory to download into. If None, a temporary dir is created and returned.
+        unzip: If True, the Kaggle API will unzip downloaded files (if supported).
+        force: If True, re-download even if files already exist.
+
+    Returns:
+        Path to the directory containing the dataset files.
+
+    Raises:
+        ValueError: if dataset_slug is empty.
+        RuntimeError: for Kaggle API related errors.
+    """
+    if not dataset_slug or "/" not in dataset_slug:
+        raise ValueError("dataset_slug must be in the form 'owner/dataset-name' (e.g. 'shivamb/netflix-shows').")
+
+    dest = path or tempfile.mkdtemp(prefix="kaggle_dataset_")
+
+    api = KaggleApi()
+    api.authenticate()
+
+    # If destination already exists and not forcing, just return it
+    if os.path.exists(dest) and os.listdir(dest) and not force:
+        return dest
+
+    try:
+        # dataset_download_files will download to dest; unzip will extract if True
+        api.dataset_download_files(dataset_slug, path=dest, unzip=unzip, quiet=False)
+    except Exception as e:
+        raise RuntimeError(f"Failed to download dataset '{dataset_slug}': {e}")
+
+    return dest
