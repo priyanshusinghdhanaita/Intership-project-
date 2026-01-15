@@ -1,0 +1,15 @@
+from kaggle.api.kaggle_api_extended import KaggleApi
+import os
+
+api = KaggleApi()
+api.authenticate()
+
+dataset = "fatihilhan/global-superstore-dataset"
+target_dir = "global-superstore"
+
+os.makedirs(target_dir, exist_ok=True)
+
+# Downloads and unzips files into target_dir
+api.dataset_download_files(dataset, path=target_dir, unzip=True)
+
+print("Downloaded to:", os.path.abspath(target_dir))
