@@ -1,0 +1,222 @@
+#!/usr/bin/env python3
+"""
+amazon_sales_analysis.py
+
+Example end-to-end Python workflow for an "Amazon sales" dataset:
+- load CSV
+- inspect & clean
+- EDA (top products, monthly sales)
+- feature engineering
+- train a simple regression model to predict order revenue
+- evaluate and save model
+
+Usage:
+  python amazon_sales_analysis.py /path/to/amazon_sales.csv
+
+Notes:
+- Adjust column names to match your dataset.
+- Requires: pandas, numpy, matplotlib, seaborn, scikit-learn, joblib
+  pip install pandas numpy matplotlib seaborn scikit-learn joblib
+"""
+import sys
+from pathlib import Path
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.compose import ColumnTransformer
+import joblib
+
+sns.set(style="whitegrid", context="talk")
+
+
+def load_data(path: Path) -> pd.DataFrame:
+    # Replace or extend read_* depending on your file format
+    df = pd.read_csv(path, parse_dates=True, infer_datetime_format=True)
+    # Common columns we expect (rename if necessary)
+    # Examples: order_date, product_id, title, category, price, quantity, revenue
+    return df
+
+
+def basic_inspect(df: pd.DataFrame):
+    print("Rows, Columns:", df.shape)
+    print("\nColumn dtypes:")
+    print(df.dtypes)
+    print("\nMissing values per column:")
+    print(df.isna().sum().sort_values(ascending=False).head(20))
+    print("\nSample rows:")
+    print(df.head(5))
+
+
+def ensure_columns(df: pd.DataFrame):
+    # Try to infer revenue if not present
+    if "revenue" not in df.columns:
+        if "price" in df.columns and "quantity" in df.columns:
+            df["revenue"] = df["price"] * df["quantity"]
+        else:
+            # If there's an order_total column or sales column, try using that
+            if "order_total" in df.columns:
+                df["revenue"] = df["order_total"]
+            elif "sales" in df.columns:
+                df["revenue"] = df["sales"]
+            else:
+                raise ValueError("No column for revenue. Provide price & quantity or revenue-like column.")
+    # Ensure we have a datetime column
+    if "order_date" not in df.columns:
+        # try common alternatives
+        for c in ["date", "order_datetime", "purchase_date"]:
+            if c in df.columns:
+                df = df.rename(columns={c: "order_date"})
+                break
+    # Parse order_date
+    if not np.issubdtype(df["order_date"].dtype, np.datetime64):
+        df["order_date"] = pd.to_datetime(df["order_date"], errors="coerce")
+    return df
+
+
+def eda_top_products(df: pd.DataFrame, top_n=10):
+    top = df.groupby("product_id", as_index=False).agg(
+        total_revenue=("revenue", "sum"),
+        total_qty=("quantity", "sum") if "quantity" in df.columns else ("revenue", "count"),
+    ).sort_values("total_revenue", ascending=False).head(top_n)
+    print(f"\nTop {top_n} products by revenue:")
+    print(top)
+    # Plot
+    plt.figure(figsize=(10, 6))
+    sns.barplot(x="total_revenue", y="product_id", data=top, palette="viridis")
+    plt.title(f"Top {top_n} products by revenue")
+    plt.xlabel("Total revenue")
+    plt.tight_layout()
+    plt.show()
+
+
+def eda_monthly_trend(df: pd.DataFrame):
+    df = df.dropna(subset=["order_date"])
+    df["order_month"] = df["order_date"].dt.to_period("M").dt.to_timestamp()
+    monthly = df.groupby("order_month", as_index=False).agg(monthly_revenue=("revenue", "sum"))
+    print("\nMonthly revenue sample:")
+    print(monthly.head())
+    plt.figure(figsize=(12, 5))
+    sns.lineplot(x="order_month", y="monthly_revenue", data=monthly, marker="o")
+    plt.title("Monthly revenue")
+    plt.xlabel("Month")
+    plt.ylabel("Revenue")
+    plt.tight_layout()
+    plt.show()
+
+
+def prepare_features(df: pd.DataFrame):
+    # Select or construct features for modeling; this is a simple example
+    # We'll predict per-order revenue using order-level features
+    # If the dataset contains an order-level identifier with multiple items per order,
+    # you might want to aggregate at order level first.
+    data = df.copy()
+
+    # Example aggregations and common feature extraction:
+    # - day of week
+    # - hour of day
+    data["order_dayofweek"] = data["order_date"].dt.dayofweek.fillna(-1).astype(int)
+    data["order_month"] = data["order_date"].dt.month.fillna(-1).astype(int)
+    # Fill missing numeric columns
+    if "price" in data.columns:
+        data["price"] = pd.to_numeric(data["price"], errors="coerce").fillna(0.0)
+    if "quantity" in data.columns:
+        data["quantity"] = pd.to_numeric(data["quantity"], errors="coerce").fillna(1.0)
+    # Categorical features (take top N categories and group others)
+    cat_cols = []
+    for c in ["category", "brand", "product_id"]:
+        if c in data.columns:
+            cat_cols.append(c)
+            # For high-cardinality columns like product_id, you may want to restrict to top-K
+            if c == "product_id":
+                top_products = data["product_id"].value_counts().nlargest(200).index
+                data.loc[~data["product_id"].isin(top_products), "product_id"] = "other_product"
+
+    # Numeric features
+    numeric_cols = []
+    for c in ["price", "quantity"]:
+        if c in data.columns:
+            numeric_cols.append(c)
+    # Always include day/month features
+    numeric_cols += ["order_dayofweek", "order_month"]
+
+    # Target
+    y = data["revenue"].fillna(0.0).astype(float)
+    # Features
+    X = data[numeric_cols + cat_cols].copy()
+    return X, y, numeric_cols, cat_cols
+
+
+def build_and_evaluate_model(X, y, numeric_cols, cat_cols, random_state=42):
+    # Train-test split
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=random_state)
+
+    # Preprocessing
+    numeric_transformer = Pipeline(steps=[("scaler", StandardScaler())])
+    cat_transformer = Pipeline(steps=[("onehot", OneHotEncoder(handle_unknown="ignore", sparse=False))])
+
+    preprocessor = ColumnTransformer(transformers=[
+        ("num", numeric_transformer, numeric_cols),
+        ("cat", cat_transformer, cat_cols),
+    ], remainder="drop")
+
+    # Model pipeline
+    model = Pipeline(steps=[
+        ("preprocessor", preprocessor),
+        ("regressor", RandomForestRegressor(n_estimators=100, random_state=random_state, n_jobs=-1)),
+    ])
+
+    print("Training model...")
+    model.fit(X_train, y_train)
+
+    print("Evaluating on test set...")
+    y_pred = model.predict(X_test)
+    rmse = mean_squared_error(y_test, y_pred, squared=False)
+    r2 = r2_score(y_test, y_pred)
+    print(f"Test RMSE: {rmse:.2f}")
+    print(f"Test R^2: {r2:.3f}")
+
+    # Cross-validated metric on training
+    cv_scores = cross_val_score(model, X_train, y_train, cv=3, scoring="neg_root_mean_squared_error", n_jobs=-1)
+    print("CV RMSE (3-fold):", -cv_scores.mean(), "±", cv_scores.std())
+
+    return model, (X_test, y_test, y_pred)
+
+
+def save_model(model, path: Path = Path("amazon_sales_model.joblib")):
+    joblib.dump(model, path)
+    print("Saved model to", path)
+
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: python amazon_sales_analysis.py /path/to/amazon_sales.csv")
+        sys.exit(1)
+
+    csv_path = Path(sys.argv[1])
+    if not csv_path.exists():
+        print("File not found:", csv_path)
+        sys.exit(2)
+
+    df = load_data(csv_path)
+    basic_inspect(df)
+    df = ensure_columns(df)
+
+    # Quick EDA
+    eda_top_products(df, top_n=10)
+    eda_monthly_trend(df)
+
+    # Prepare features and model
+    X, y, numeric_cols, cat_cols = prepare_features(df)
+    model, eval_data = build_and_evaluate_model(X, y, numeric_cols, cat_cols)
+
+    save_model(model)
+
+
+if __name__ == "__main__":
+    main()
