@@ -1,0 +1,18 @@
+from kaggle.api.kaggle_api_extended import KaggleApi
+import os
+
+api = KaggleApi()
+api.authenticate()
+
+dataset = "steve1215rogg/e-commerce-dataset"
+target_dir = "./ecommerce_dataset"
+
+os.makedirs(target_dir, exist_ok=True)
+# downloads a zip to target_dir; set unzip=True to automatically unzip (extract_all=True available on some versions)
+api.dataset_download_files(dataset, path=target_dir, unzip=True)
+
+print("Downloaded and unzipped to:", os.path.abspath(target_dir))
+# list files
+for root, dirs, files in os.walk(target_dir):
+    for f in files:
+        print(os.path.join(root, f))
